@@ -46,7 +46,7 @@ void place(void *bp, int alloc_size);
 /* Basic constants and macros */
 #define WSIZE 4     /* Word and header/footer size (bytes) */
 #define DSIZE 8     /* Double word size (bytes) */
-#define MIN_SIZE 24 /* Minimum size to contain two pointers and header + footer for free blocks */
+#define MIN_SIZE 16 /* Minimum size to contain two pointers and header + footer for free blocks */
 
 #define CHUNKSIZE (1 << 12) /* Extend heap by this amount (bytes) */
 
@@ -85,7 +85,6 @@ static char *heap_end;
 
 void *lv_root(int level) {
     /* returns the address of level root */
-
     return lv_header + (level - 1) * 4;
 }
 
@@ -262,7 +261,7 @@ void *coalesce(void *bp) {
 
         if (bp != 0)
             delete_node(level_prev, PREV_BLKP(bp));
-        if (NEXT_NODE(bp) != 0)
+        if (GET(NEXT_NODE(bp)) != 0)
             delete_node(level_next, NEXT_BLKP(bp));
         if (GET(bp) != 0)
             delete_node(level, bp);
@@ -284,7 +283,7 @@ void *coalesce(void *bp) {
 void *extend_heap(size_t size) {
     char *bp;
 
-    /* Grow Heap */
+    /* Grow heap with one block that contains data and header/footer. */
     if ((long)(bp = mem_sbrk(size)) == -1)
         return NULL;
 
@@ -424,5 +423,98 @@ void mm_free(void *ptr) {
 }
 
 void *mm_realloc(void *ptr, size_t size) {
-    return NULL;
+
+    if (ptr == NULL)
+        return mm_malloc(size);
+
+    if (size == 0) {
+        mm_free(ptr);
+        return NULL;
+    }
+
+    size_t oldsize = GET_SIZE(HDRP(ptr));
+
+    /* Define the block size and align */
+    size_t asize = MAX(MIN_SIZE, ALIGN(size + 8));
+
+    /* Case 1. Recalled block size shrinks */
+    if (asize < oldsize) {
+        /* 
+         * Modify the size of ptr in the header and footer.
+         * Block is splitted into two sections.
+         * Realloced(alloc = 1) + Free (alloc = 0)
+         * Free block would have the size of (old_size - asize). 
+         */
+        PUT(HDRP(ptr), PACK(asize, 1));
+        PUT(FTRP(ptr), PACK(asize, 1));
+        char *free_block = NEXT_BLKP(ptr);
+        PUT(HDRP(free_block), PACK(oldsize - asize, 0));
+        PUT(FTRP(free_block), PACK(oldsize - asize, 0));
+
+        mm_free(free_block);
+
+        return ptr;
+
+        /* Case 2. Recalled block size is identical to the old one. */
+    } else if (asize == oldsize) {
+        /*
+         * In this case, we don't have to modify the block.
+         */
+        return ptr;
+
+        /* Case 3. Recalled block size is BIGGER than old one */
+    } else {
+        /*
+         * Check the size of the block behind. NEXT_BLKP(ptr)
+         * Calculate the size that would be added(req_size).
+         * 
+         *  If the next block size is larger than req_size + 10,
+         *  realloc the block as usual and modify remainder as another free block. 
+         *  Block size 10 is arbitrarily determined.
+         * 
+         *  ******** req_size does not take header and footer into account.
+         * 
+         */
+
+        char *next_block = NEXT_BLKP(ptr);
+        size_t next_size = GET_SIZE(HDRP(next_block));
+        size_t req_size = asize - oldsize;
+
+        if (next_size >= req_size + 10) {
+            /* Reallocation. Change the size of block in the header and footer. */
+            PUT(HDRP(ptr), PACK(asize, 1));
+            PUT(FTRP(ptr), PACK(asize, 1));
+
+            /* Handle the remainder block. */
+            char *free_block = NEXT_BLKP(ptr);
+            PUT(HDRP(free_block), PACK(req_size, 0));
+            PUT(FTRP(free_block), PACK(req_size, 0));
+            mm_free(free_block);
+        }
+
+        /*
+         * The size of remainder block is small but still can contain req_size.
+         * So, just take the block as dummy.
+         */ 
+        else if (next_size < req_size + 10 && next_size > req_size) {
+            PUT(HDRP(ptr), PACK(oldsize + next_size, 1));
+            PUT(FTRP(ptr), PACK(oldsize + next_size, 1));
+            /* Fill the uninitialized region with 0 padding */
+            for (char *tmp = ptr; tmp < HDRP(ptr); tmp++) {
+                PUT(tmp, 0);
+            }
+        }
+
+        /*
+         * Next block is still not enough to realloc.
+         * Use malloc to make block(with asize), and move the data to appropriate place.
+         * Original block is freed.
+         */
+
+        else {
+            char *mv = mm_malloc(asize);
+            memcpy(mv, ptr, oldsize - 2*WSIZE); // memcpy only the data.
+            mm_free(ptr);
+        }
+    }
 }

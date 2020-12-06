@@ -233,8 +233,7 @@ void *coalesce(void *bp) {
         size_t size_prev = GET_SIZE(HDRP(PREV_BLKP(bp)));
         int level_prev = size_level(size_prev);
 
-        if (bp != 0)
-            delete_node(level_prev, PREV_BLKP(bp));
+        delete_node(level_prev, PREV_BLKP(bp));
 
         /* When the block is extended by extend_heap,
          * there is no prev/next node. So, in this case,
@@ -259,10 +258,8 @@ void *coalesce(void *bp) {
         size_t size_prev = GET_SIZE(HDRP(PREV_BLKP(bp)));
         int level_prev = size_level(size_prev);
 
-        if (bp != 0)
-            delete_node(level_prev, PREV_BLKP(bp));
-        if (GET(NEXT_NODE(bp)) != 0)
-            delete_node(level_next, NEXT_BLKP(bp));
+        delete_node(level_prev, PREV_BLKP(bp));
+        delete_node(level_next, NEXT_BLKP(bp));
         if (GET(bp) != 0)
             delete_node(level, bp);
 
@@ -283,7 +280,9 @@ void *coalesce(void *bp) {
 void *extend_heap(size_t size) {
     char *bp;
 
-    /* Grow heap with one block that contains data and header/footer. */
+    size = MAX(ALIGN(size), MIN_SIZE);
+
+    /* Grow heap */
     if ((long)(bp = mem_sbrk(size)) == -1)
         return NULL;
 
@@ -423,7 +422,6 @@ void mm_free(void *ptr) {
 }
 
 void *mm_realloc(void *ptr, size_t size) {
-
     if (ptr == NULL)
         return mm_malloc(size);
 
@@ -495,7 +493,7 @@ void *mm_realloc(void *ptr, size_t size) {
         /*
          * The size of remainder block is small but still can contain req_size.
          * So, just take the block as dummy.
-         */ 
+         */
         else if (next_size < req_size + 10 && next_size > req_size) {
             PUT(HDRP(ptr), PACK(oldsize + next_size, 1));
             PUT(FTRP(ptr), PACK(oldsize + next_size, 1));
@@ -513,7 +511,7 @@ void *mm_realloc(void *ptr, size_t size) {
 
         else {
             char *mv = mm_malloc(asize);
-            memcpy(mv, ptr, oldsize - 2*WSIZE); // memcpy only the data.
+            memcpy(mv, ptr, oldsize - 2 * WSIZE);  // memcpy only the data.
             mm_free(ptr);
         }
     }

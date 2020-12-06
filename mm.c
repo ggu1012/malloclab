@@ -71,6 +71,9 @@ void place(void *bp, int alloc_size);
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp)-WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp)-GET_SIZE(((char *)(bp)-DSIZE)))
 
+#define ALIGNMENT 8
+#define ALIGN(size) (8 * ((size) + (ALIGNMENT-1)) & ~0x7)
+
 /* Find out the next node of free block in the level insight.
  * Prev node = bp
  */
@@ -82,7 +85,7 @@ static char *heap_end;
 
 void *lv_root(int level) {
     /* returns the address of level root */
-    
+
     return lv_header + (level - 1) * 4;
 }
 
@@ -111,7 +114,7 @@ void insert_node(int level, void *bp) {
 
     // if bp is not in the tail,
     // modify prev of bp->next node
-    if (GET(bp_next) != heap_end)
+    if (GET(bp_next) != 0)
         PUT(original_root_next, bp);
 }
 
@@ -126,12 +129,12 @@ void delete_node(int level, void *bp) {
     char *_lv_root = lv_root(level);
 
     // set prev, next node between two active nodes
-    if(prev == _lv_root)
+    if (prev == _lv_root)
         PUT(_lv_root, next);
     else
         PUT(NEXT_NODE(prev), next);
 
-    if (next != heap_end)
+    if (next != 0)
         PUT(next, prev);
 
     // set NULL pointer to bp
@@ -158,10 +161,6 @@ int mm_init(void) {
     /* Header for level pointers */
     PUT(lv_header, PACK(2 * WSIZE + 4 * WSIZE, 1));
 
-    /* Level pointers are implemented in extend_heap,
-     * at init., those will point at heap_end.
-     */
-
     /* Footer for level pointers */
     PUT(lv_header + WSIZE + 4 * WSIZE, PACK(2 * WSIZE + 4 * WSIZE, 1));
 
@@ -169,6 +168,11 @@ int mm_init(void) {
     PUT(lv_header + (2 * WSIZE + 4 * WSIZE), PACK(0, 1));
 
     lv_header += WSIZE;
+
+        /* End of list will point to NULL*/
+    for (int i = 1; i <= 4; i++) {
+        PUT(lv_root(i), 0);
+    }
 
     /* Change storage pointer to right after Lv 4 header */
     storage = lv_root(4) + WSIZE + WSIZE;
@@ -210,7 +214,7 @@ void *coalesce(void *bp) {
         delete_node(level, bp);
 
         // coalesced size
-        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
+        size += size_next;
 
         PUT(HDRP(bp), PACK(size, 0));
         PUT(FTRP(bp), PACK(size, 0));
@@ -225,10 +229,17 @@ void *coalesce(void *bp) {
         size_t size_prev = GET_SIZE(HDRP(PREV_BLKP(bp)));
         int level_prev = size_level(size_prev);
 
-        delete_node(level_prev, PREV_BLKP(bp));
-        delete_node(level, bp);
+        if(bp !=0)
+            delete_node(level_prev, PREV_BLKP(bp));
 
-        size += GET_SIZE(HDRP(PREV_BLKP(bp)));
+        /* When the block is extended by extend_heap,
+         * there is no prev/next node. So, in this case,
+         * delete_node should not be handled to avoid segmentation fault. 
+         */
+        if(GET(bp) != 0)
+            delete_node(level, bp);
+
+        size += size_prev;
         PUT(FTRP(bp), PACK(size, 0));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
@@ -248,8 +259,7 @@ void *coalesce(void *bp) {
         delete_node(level_next, NEXT_BLKP(bp));
         delete_node(level, bp);
 
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))) +
-                GET_SIZE(FTRP(NEXT_BLKP(bp)));
+        size += size_prev + size_next;
 
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
@@ -275,13 +285,8 @@ void *extend_heap(size_t size) {
 
     PUT(HDRP(NEXT_BLKP(bp)), PACK(0, 1)); /* New epilogue header */
 
-    /* If level root pointer is still pointing epilogue header,
-       change them. */
-
-    for (int i = 0; i < 4; i++) {
-        if (GET(lv_header + i * 4) == heap_end)
-            PUT(lv_header + i * 4, NEXT_BLKP(bp));
-    }
+    PUT(bp, 0);
+    PUT(NEXT_NODE(bp), 0);
 
     heap_end = NEXT_BLKP(bp);
 
@@ -318,7 +323,7 @@ void *mm_malloc(size_t size) {
     for (int i = level; i <= 4; i++) {
         // 'tmp' is used for level-list walk
         char *tmp = GET(lv_root(i));
-        while (tmp != heap_end) {
+        while (tmp != 0) {
             if (GET_ALLOC(HDRP(tmp)) == 0 && (GET_SIZE(HDRP(tmp)) >= asize)) {
                 /* Found the empty block with enough size. Insert here! */
                 place(tmp, asize);
@@ -333,11 +338,10 @@ void *mm_malloc(size_t size) {
      * Now, extend the heap and place.
      * mem_heap_hi indicates the address of heap_end block.
      */
-    if(GET_ALLOC(heap_end - 2 * WSIZE) == 0)
-        asize -= GET_SIZE(heap_end - 2*WSIZE);
+    if (GET_ALLOC(heap_end - 2 * WSIZE) == 0)
+        asize -= GET_SIZE(heap_end - 2 * WSIZE);
     char *pos = extend_heap(asize);
-    place(pos, asize);
-
+    place(pos, size + 8);
 
     return pos;
 }
@@ -364,7 +368,6 @@ void place(void *bp, int alloc_size) {
         return;
     }
 
-
     /*
      * If remaining free bytes is larger than MIN 16 bytes, split the block.
      * Change the information of block in the header and footer.
@@ -373,7 +376,7 @@ void place(void *bp, int alloc_size) {
 
     PUT(HDRP(bp), PACK(alloc_size, 1));
     PUT(FTRP(bp), PACK(alloc_size, 1));
-    delete_node(size_level(before_size),bp);
+    delete_node(size_level(before_size), bp);
 
     /* 
      * Information of remaining block is as follows.
@@ -392,7 +395,8 @@ void place(void *bp, int alloc_size) {
 void mm_free(void *ptr) {
     /*
      * 1. Change the information of block. alloc 1 -> 0
-     * 2. Coalesce.
+     * 2. Set the data, which was prev/next pointer, to 0. 
+     * 3. Coalesce.
      */
     if (ptr == NULL)
         return;
@@ -404,6 +408,8 @@ void mm_free(void *ptr) {
 
     PUT(HDRP(ptr), PACK(size, 0));
     PUT(FTRP(ptr), PACK(size, 0));
+    PUT(ptr, 0);
+    PUT(NEXT_NODE(ptr), 0);
 
     coalesce(ptr);
 }

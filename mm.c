@@ -72,7 +72,7 @@ void place(void *bp, int alloc_size);
 #define PREV_BLKP(bp) ((char *)(bp)-GET_SIZE(((char *)(bp)-DSIZE)))
 
 #define ALIGNMENT 8
-#define ALIGN(size) (8 * ((size) + (ALIGNMENT-1)) & ~0x7)
+#define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
 
 /* Find out the next node of free block in the level insight.
  * Prev node = bp
@@ -93,10 +93,13 @@ void *lv_root(int level) {
 // Level 2 : size 2^8 ~ 2^16-1
 // Level 3 : size 2^16 ~ 2^24-1
 // Level 4 : 2^24 ~ 2^32-1
-int size_level(int size) {
+size_t size_level(size_t size) {
     int n = 0;
-    while (size > (1 << (n << 3)))
+    int div = 0;
+    while (size > (div = 1 << (n << 3))) {
         n++;
+        if (n == 3) break;
+    }
     return n++;
 }
 
@@ -169,7 +172,7 @@ int mm_init(void) {
 
     lv_header += WSIZE;
 
-        /* End of list will point to NULL*/
+    /* End of list will point to NULL*/
     for (int i = 1; i <= 4; i++) {
         PUT(lv_root(i), 0);
     }
@@ -209,9 +212,11 @@ void *coalesce(void *bp) {
         int level_next = size_level(size_next);
 
         // Delete next node from the level list
-        delete_node(level_next, NEXT_BLKP(bp));
+        if (NEXT_NODE(bp) != 0)
+            delete_node(level_next, NEXT_BLKP(bp));
         // Delete current node from the level list
-        delete_node(level, bp);
+        if (GET(bp) != 0)
+            delete_node(level, bp);
 
         // coalesced size
         size += size_next;
@@ -229,14 +234,14 @@ void *coalesce(void *bp) {
         size_t size_prev = GET_SIZE(HDRP(PREV_BLKP(bp)));
         int level_prev = size_level(size_prev);
 
-        if(bp !=0)
+        if (bp != 0)
             delete_node(level_prev, PREV_BLKP(bp));
 
         /* When the block is extended by extend_heap,
          * there is no prev/next node. So, in this case,
          * delete_node should not be handled to avoid segmentation fault. 
          */
-        if(GET(bp) != 0)
+        if (GET(bp) != 0)
             delete_node(level, bp);
 
         size += size_prev;
@@ -255,9 +260,12 @@ void *coalesce(void *bp) {
         size_t size_prev = GET_SIZE(HDRP(PREV_BLKP(bp)));
         int level_prev = size_level(size_prev);
 
-        delete_node(level_prev, PREV_BLKP(bp));
-        delete_node(level_next, NEXT_BLKP(bp));
-        delete_node(level, bp);
+        if (bp != 0)
+            delete_node(level_prev, PREV_BLKP(bp));
+        if (NEXT_NODE(bp) != 0)
+            delete_node(level_next, NEXT_BLKP(bp));
+        if (GET(bp) != 0)
+            delete_node(level, bp);
 
         size += size_prev + size_next;
 
@@ -305,6 +313,7 @@ void *mm_malloc(size_t size) {
     if (storage == 0)
         mem_init();
 
+    size = ALIGN(size);
     int level = size_level(size);
 
     /* 

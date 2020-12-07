@@ -449,7 +449,7 @@ void *mm_realloc(void *ptr, size_t size) {
         PUT(HDRP(free_block), PACK(oldsize - asize, 0));
         PUT(FTRP(free_block), PACK(oldsize - asize, 0));
 
-        mm_free(free_block);
+        coalesce(free_block);
 
         return ptr;
 
@@ -478,16 +478,36 @@ void *mm_realloc(void *ptr, size_t size) {
         size_t next_size = GET_SIZE(HDRP(next_block));
         size_t req_size = asize - oldsize;
 
+        if (GET_ALLOC(HDRP(next_block)) == 1) {     
+            char *mv = mm_malloc(asize - 8);       // header and footer are added in mm_malloc
+
+            for (int i = 0; i < oldsize - 2 * WSIZE; i+=4)
+                PUT(mv + i, GET(ptr + i));
+            mm_free(ptr);
+
+            return mv;
+        }
+
         if (next_size >= req_size + 10) {
+
+            /* Delete the node of next block */
+            delete_node(size_level(next_size), next_block);
+
+            /* Original footer should be erased to avoid contamination. */
+            PUT(FTRP(ptr), 0);
+            PUT(HDRP(NEXT_BLKP(ptr)), 0);
+
             /* Reallocation. Change the size of block in the header and footer. */
             PUT(HDRP(ptr), PACK(asize, 1));
             PUT(FTRP(ptr), PACK(asize, 1));
 
             /* Handle the remainder block. */
             char *free_block = NEXT_BLKP(ptr);
-            PUT(HDRP(free_block), PACK(req_size, 0));
-            PUT(FTRP(free_block), PACK(req_size, 0));
-            mm_free(free_block);
+            PUT(HDRP(free_block), PACK(next_size - req_size, 0));
+            PUT(FTRP(free_block), PACK(next_size - req_size, 0));
+            insert_node(size_level(next_size - req_size), free_block);
+
+            return ptr;
         }
 
         /*
@@ -495,24 +515,35 @@ void *mm_realloc(void *ptr, size_t size) {
          * So, just take the block as dummy.
          */
         else if (next_size < req_size + 10 && next_size > req_size) {
+
+            /* Delete the node of next block */
+            delete_node(next_size, next_block);
+
+            /* Erase footer and header of next block to avoid contamination. */
+            PUT(FTRP(ptr), 0);
+            PUT(next_block, 0);
+
             PUT(HDRP(ptr), PACK(oldsize + next_size, 1));
             PUT(FTRP(ptr), PACK(oldsize + next_size, 1));
             /* Fill the uninitialized region with 0 padding */
-            for (char *tmp = ptr; tmp < HDRP(ptr); tmp++) {
+            for (char *tmp = ptr; tmp < HDRP(ptr); tmp++)
                 PUT(tmp, 0);
-            }
+
+            return ptr;
         }
 
         /*
          * Next block is still not enough to realloc.
-         * Use malloc to make block(with asize), and move the data to appropriate place.
+         * Use malloc to make block(with asize) after tail, and move the data to appropriate place.
          * Original block is freed.
          */
 
         else {
-            char *mv = mm_malloc(asize);
+            char *mv = mm_malloc(asize - 8);
             memcpy(mv, ptr, oldsize - 2 * WSIZE);  // memcpy only the data.
             mm_free(ptr);
+
+            return mv;
         }
     }
 }

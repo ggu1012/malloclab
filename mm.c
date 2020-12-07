@@ -1,13 +1,51 @@
 /*
- * mm-naive.c - The fastest, least memory-efficient malloc package.
- * 
- * In this naive approach, a block is allocated by simply incrementing
- * the brk pointer.  A block is pure payload. There are no headers or
- * footers.  Blocks are never coalesced or reused. Realloc is
- * implemented directly using mm_malloc and mm_free.
  *
- * NOTE TO STUDENTS: Replace this header comment with your own header
- * comment that gives a high level description of your solution.
+ * mm.c  
+ * 
+ * Perf index = 51 (util) + 40 (thru) = 91/100
+ * 
+ * *********** Structure
+ * 
+ * There are two types of block; alloc'ed and free.
+ *              
+ *  For alloc case, ----------------------------------------------------------------- 
+ *                  |  HEADER(size, alloc) |       DATA        | FOOTER(size,alloc) |
+ *                  -----------------------------------------------------------------
+ *                          4                      8x                   4
+ * 
+ * Block is composed of header and footer. The size of data is aligned with ALIGN() macro,
+ * and the total block size is a multiple of 8.
+ * 
+ * 
+ *  For free case,  ----------------------------------------------------------------------------------------------- 
+ *                  |  HEADER(size, alloc) |    prev_node    |   next_node     |     ....     | FOOTER(size,alloc) |
+ *                  -----------------------------------------------------------------------------------------------
+ *                          4                      4                4                8x               4
+ * In this case, instead of containing data, two nodes are added for implementing segregated list.
+ * Each node indicates the previous or next node of certain level, defined by its block size.
+ * 
+ * 
+ * ********** Segregated list
+ * 
+ * List is segregated into 8 levels, and each level is determined with the block size.
+ * Converting the size number to the level is held by size_level() function.
+ * Free block manipulation is implemented with First-fit method. 
+ * 
+ * ********** Functions
+ * 
+ * coalesce() : Manipulates the free blocks. Block merging and splitting is held.
+ * place() : Manipulates the allocation.
+ * extend_heap() : Extend the heap size.
+ * lv_root() : Find the root of certain level. Every segregated lists start from here.
+ * size_level() : Returns the level that matches to certain size.
+ * insert_node(), delete_node() : Handle the segregated list. See the code for more information. 
+ * 
+ * 
+ * ********** Reference
+ * Macro functions and helper functions (extend_heap, coalesce, place)
+ * are based on the textbook page 891.
+ * 
+ * 
  */
 #include "mm.h"
 
@@ -39,8 +77,8 @@ void *extend_heap(size_t size);
 void *coalesce(void *bp);
 void place(void *bp, int alloc_size);
 
-/* Macros below are based on the textbook example
- * on page 893.
+/* 
+ * Macros below are based on the textbook example, page 893.
  */
 
 /* Basic constants and macros */
@@ -71,33 +109,39 @@ void place(void *bp, int alloc_size);
 #define NEXT_BLKP(bp) ((char *)(bp) + GET_SIZE(((char *)(bp)-WSIZE)))
 #define PREV_BLKP(bp) ((char *)(bp)-GET_SIZE(((char *)(bp)-DSIZE)))
 
+/* Every block size is aligned by a multiple of 8. */
 #define ALIGNMENT 8
 #define ALIGN(size) (((size) + (ALIGNMENT - 1)) & ~0x7)
 
-/* Find out the next node of free block in the level insight.
- * Prev node = bp
+/* 
+ * Find out the next node of free block in the level insight.
+ * Prev node = bp, Next node = bp + WSIZE
  */
 #define NEXT_NODE(bp) ((char *)(bp) + WSIZE)
 
 static char *lv_header;    // Pointing Lv1. header
 static char *storage = 0;  // Region after level headers. Storing starts here.
-static char *heap_end;
+static char *heap_end;     // End of heap.
 
 void *lv_root(int level) {
     /* returns the address of level root */
     return lv_header + (level - 1) * 4;
 }
 
-// Level 1 : size 0 ~ 2^8-1
-// Level 2 : size 2^8 ~ 2^16-1
-// Level 3 : size 2^16 ~ 2^24-1
-// Level 4 : 2^24 ~ 2^32-1
+/*
+ * Level 1 : size 0 ~ 2^4-1
+ * Level 2 : size 2^4 ~ 2^8-1
+ * Level 3 : size 2^8 ~ 2^12-1
+ * ... Level N : size 2^(4N-4) ~ 2^4N - 1
+ * 
+ * Total 8 levels.
+ */
 size_t size_level(size_t size) {
     int n = 0;
     int div = 0;
-    while (size > (div = 1 << (n << 3))) {
+    while (size > (div = 1 << (n << 2))) {
         n++;
-        if (n == 3) break;
+        if (n == 7) break;
     }
     return n++;
 }
@@ -125,9 +169,11 @@ void delete_node(int level, void *bp) {
     char *bp_prev = bp;
     char *bp_next = NEXT_NODE(bp);
 
+    /* prev and next indicates the address of corresponding block. */
     char *prev = GET(bp_prev);
     char *next = GET(bp_next);
 
+    /* _lv_root indicates the starting point of the level list.*/
     char *_lv_root = lv_root(level);
 
     // set prev, next node between two active nodes
@@ -146,10 +192,11 @@ void delete_node(int level, void *bp) {
 
 int mm_init(void) {
     /* Create the initial empty heap */
-    if ((lv_header = mem_sbrk(4 * WSIZE + 4 * WSIZE)) == (void *)-1)
+    if ((lv_header = mem_sbrk(4 * WSIZE + 8 * WSIZE)) == (void *)-1)
         return -1;
 
-    /* 4 blocks at the start points the first block of each level.
+    /* 
+     * 4 blocks at the start points the first block of each level.
      * If Lv. header indicates heap_end, it means there is no block in such level.
      * So, in this case, we should walk over another level for finding out
      * the block that is large enough to store the data.
@@ -161,23 +208,22 @@ int mm_init(void) {
     lv_header += 4;
 
     /* Header for level pointers */
-    PUT(lv_header, PACK(2 * WSIZE + 4 * WSIZE, 1));
+    PUT(lv_header, PACK(2 * WSIZE + 8 * WSIZE, 1));
 
     /* Footer for level pointers */
-    PUT(lv_header + WSIZE + 4 * WSIZE, PACK(2 * WSIZE + 4 * WSIZE, 1));
+    PUT(lv_header + WSIZE + 8 * WSIZE, PACK(2 * WSIZE + 8 * WSIZE, 1));
 
     /* Epilogue header */
-    PUT(lv_header + (2 * WSIZE + 4 * WSIZE), PACK(0, 1));
+    PUT(lv_header + (2 * WSIZE + 8 * WSIZE), PACK(0, 1));
 
     lv_header += WSIZE;
 
     /* End of list will point to NULL*/
-    for (int i = 1; i <= 4; i++) {
+    for (int i = 1; i <= 8; i++)
         PUT(lv_root(i), 0);
-    }
 
     /* Change storage pointer to right after Lv 4 header */
-    storage = lv_root(4) + WSIZE + WSIZE;
+    storage = lv_root(8) + WSIZE;
 
     /* Extend the empty heap with a free block of CHUNKSIZE bytes */
     if (extend_heap(CHUNKSIZE) == NULL)
@@ -250,14 +296,13 @@ void *coalesce(void *bp) {
 
     else { /* Case 4 */
 
-        /* Delete three nodes(prev, now, next) */
-
         size_t size_next = GET_SIZE(HDRP(NEXT_BLKP(bp)));
         int level_next = size_level(size_next);
 
         size_t size_prev = GET_SIZE(HDRP(PREV_BLKP(bp)));
         int level_prev = size_level(size_prev);
 
+        /* Delete three nodes(prev, now, next) */
         delete_node(level_prev, PREV_BLKP(bp));
         delete_node(level_next, NEXT_BLKP(bp));
         if (GET(bp) != 0)
@@ -327,7 +372,7 @@ void *mm_malloc(size_t size) {
      */
     size_t asize = MAX(MIN_SIZE, size + 8);
 
-    for (int i = level; i <= 4; i++) {
+    for (int i = level; i <= 8; i++) {
         // 'tmp' is used for level-list walk
         char *tmp = GET(lv_root(i));
         while (tmp != 0) {
@@ -437,21 +482,30 @@ void *mm_realloc(void *ptr, size_t size) {
 
     /* Case 1. Recalled block size shrinks */
     if (asize < oldsize) {
-        /* 
-         * Modify the size of ptr in the header and footer.
-         * Block is splitted into two sections.
-         * Realloced(alloc = 1) + Free (alloc = 0)
-         * Free block would have the size of (old_size - asize). 
+        /* If(old_size - asize) is smaller than MIN_SIZE,
+         * do not split the block and just take that as dummy data.
          */
-        PUT(HDRP(ptr), PACK(asize, 1));
-        PUT(FTRP(ptr), PACK(asize, 1));
-        char *free_block = NEXT_BLKP(ptr);
-        PUT(HDRP(free_block), PACK(oldsize - asize, 0));
-        PUT(FTRP(free_block), PACK(oldsize - asize, 0));
+        if (oldsize - asize <= MIN_SIZE) {
+            return ptr;
 
-        coalesce(free_block);
+        } else {
+            /* 
+            * Modify the size of ptr in the header and footer.
+            * Block is splitted into two sections.
+            * Realloced(alloc = 1) + Free (alloc = 0)
+            * Free block would have the size of (old_size - asize).
+            */
 
-        return ptr;
+            PUT(HDRP(ptr), PACK(asize, 1));
+            PUT(FTRP(ptr), PACK(asize, 1));
+
+            char *free_block = NEXT_BLKP(ptr);
+            PUT(HDRP(free_block), PACK(oldsize - asize, 0));
+            PUT(FTRP(free_block), PACK(oldsize - asize, 0));
+            coalesce(free_block);
+
+            return ptr;
+        }
 
         /* Case 2. Recalled block size is identical to the old one. */
     } else if (asize == oldsize) {
@@ -460,7 +514,7 @@ void *mm_realloc(void *ptr, size_t size) {
          */
         return ptr;
 
-        /* Case 3. Recalled block size is BIGGER than old one */
+        /* Case 3. Recalled block size is LARGER than old one */
     } else {
         /*
          * Check the size of the block behind. NEXT_BLKP(ptr)
@@ -478,18 +532,25 @@ void *mm_realloc(void *ptr, size_t size) {
         size_t next_size = GET_SIZE(HDRP(next_block));
         size_t req_size = asize - oldsize;
 
-        if (GET_ALLOC(HDRP(next_block)) == 1) {     
-            char *mv = mm_malloc(asize - 8);       // header and footer are added in mm_malloc
+        /* 
+         * If next block is not a free block,
+         * extend the heap and Copy and paste the data 
+         */
+        if (GET_ALLOC(HDRP(next_block)) == 1) {
+            /* Extend heap */
+            char *mv = mm_malloc(asize - 8);
 
-            for (int i = 0; i < oldsize - 2 * WSIZE; i+=4)
+            /* Copy and paste the data */
+            for (int i = 0; i < oldsize - 2 * WSIZE; i += 4)
                 PUT(mv + i, GET(ptr + i));
+
+            /* Free the old house. */
             mm_free(ptr);
 
             return mv;
         }
 
         if (next_size >= req_size + 10) {
-
             /* Delete the node of next block */
             delete_node(size_level(next_size), next_block);
 
@@ -515,7 +576,6 @@ void *mm_realloc(void *ptr, size_t size) {
          * So, just take the block as dummy.
          */
         else if (next_size < req_size + 10 && next_size > req_size) {
-
             /* Delete the node of next block */
             delete_node(next_size, next_block);
 
@@ -523,8 +583,10 @@ void *mm_realloc(void *ptr, size_t size) {
             PUT(FTRP(ptr), 0);
             PUT(next_block, 0);
 
+            /* Add header and footer for the new block. */
             PUT(HDRP(ptr), PACK(oldsize + next_size, 1));
             PUT(FTRP(ptr), PACK(oldsize + next_size, 1));
+
             /* Fill the uninitialized region with 0 padding */
             for (char *tmp = ptr; tmp < HDRP(ptr); tmp++)
                 PUT(tmp, 0);
@@ -540,10 +602,61 @@ void *mm_realloc(void *ptr, size_t size) {
 
         else {
             char *mv = mm_malloc(asize - 8);
-            memcpy(mv, ptr, oldsize - 2 * WSIZE);  // memcpy only the data.
+            for (int i = 0; i < oldsize - 2 * WSIZE; i += 4)
+                PUT(mv + i, GET(ptr + i));
             mm_free(ptr);
 
             return mv;
         }
     }
 }
+
+/* Heap consistency checker */
+
+// int mm_check(int opt) {
+//     char *tmp;  // Used for list walk.
+
+//     /*
+//      * Is every block in the free list marked as free?
+//      * Check all the lists, walking from the root to the end(NULL).
+//      */
+//     for (int i = 1; i <= 4; i++) {
+//         /* Root of the list */
+//         tmp = lv_root(i);
+//         while (tmp != 0) {
+//             if (GET_ALLOC(FTRP(tmp)) != 0) {
+//                 fprintf(stderr, "Alloc'ed in free list??\n");
+//                 return 0;
+//             }
+//             tmp = GET(NEXT_NODE(tmp));
+//         }
+//     }
+
+//     tmp = storage;  // Right after the level header block.
+
+//     while (GET_SIZE(HDRP(tmp)) != 0) {  // Check the end of blocks by epilogue block, which size is zero.
+
+//         /*
+//         * Are there any contiguous free blocks that somehow escaped coalescing?
+//         * Check by allocation bit of header and footer.
+//         */
+//         if (!GET_ALLOC(FTRP(tmp)) && !GET_ALLOC(HDRP(NEXT_BLKP(tmp)))) {
+//             fprintf(stderr, "Contiguous free block after calling coalesce().\n");
+//             return 0;
+//         }
+
+//         /*
+//         * Is every free block actually in the free list?
+//         * If the prev and next node part free block is filled with zero,
+//         * it's not located in the free list.
+//         */
+
+//         if (!GET_ALLOC(FTRP(tmp)) && (GET(tmp) == 0 || GET(NEXT_NODE(tmp) == 0))) {
+//             fprintf(stderr, "Free block, but its prev/next node is empty\n");
+//             return 0;
+//         }
+//         tmp = NEXT_BLKP(tmp);
+//     }
+
+//     return 1;
+// }
